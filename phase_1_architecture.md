@@ -51,12 +51,28 @@ Snowflake breaks this bundle into **three independent layers**:
 - Data is automatically compressed, organized into **micro-partitions**, and stored in a **columnar format**.
 - You never manage this storage directly — no disks to provision, no partitioning to design manually.
 - **This layer is shared** — every virtual warehouse in your account reads from the *same* single copy of data. No data duplication across compute clusters.
+- **When u create a sf account in a region with a specific cloud, the underlying storage and compute lies in same region for low latency, though u can have multiple sf account/cloud providers under a Org account, multi-cluster vwh are also in same region**
 
 ### Layer 2: Query Processing Layer (Virtual Warehouses)
 - This is the actual "compute" — clusters of CPU/memory that execute your SQL queries.
 - Called **Virtual Warehouses** in Snowflake.
 - You can spin up multiple independent warehouses, each isolated from the others, all pointing at the same underlying data.
 - Because compute is separate from storage, you can scale compute up/down or add more warehouses **without moving or duplicating data**.
+- **Each Named Virtual WH u create can have 1 cluster at min and mutli-clusters u defined manually, these multipl clusters can spin up and down as load increases or decrases**
+- 1 cluster = 1 server (xs), 2 servers (s), 4 servers (m) , 8 servers (l), ...
+
+### Imp points :
+
+- **Increasesing size of wh allows parallelism in sense that a big heavy query can be run on multiple servers, which will reduce its execution time of a single query, but it wont solve the problem of concurrency (multiple users query at a time, therefore queries are queued and slow results) , to solve concurreny use multi-cluster vwh !!** 
+
+- **A common confusion that i always have is : if big wh size then queries will execute quickly so other queries will be taken, this is true, but the other queries still have to wait !! if u want other queries not to be queued then u must use multi-clusters vwh!!!**
+
+- **When to scale up vs scale horizontally ?**
+- Scale up : when u have big complex queries not too many concurrent queries and also look at **Query Profile**, if the **Bytes spilled to local storage, Bytes spilled to remote storage** are non-zero positive no. then u need to scale up buddy, **spilling means while performing intermediate steps, the RAM storage ran out, so it will use local ssd and then the last option is to use remote disk if everything fulls, therefore scaling up increases our RAM so query executes quickly and intermediate storage does not run out**
+
+- Scale horizonatl when u see too much queued time in **Query Profile**
+-Symptom to look for: WAREHOUSE_LOAD_HISTORY view — if AVG_RUNNING is near your cluster count and AVG_QUEUED_LOAD is high, you need more clusters, not a bigger one.
+
 
 ### Layer 3: Cloud Services Layer
 - The "brain" that ties everything together: authentication, access control, query parsing, query optimization, transaction management, metadata management.
@@ -106,6 +122,10 @@ CREATE WAREHOUSE my_wh
   INITIALLY_SUSPENDED = TRUE; -- don't start it immediately, save credits
 ```
 
+- **understanding auto suspend is very imp, if auto_suspend = 60, ur query took 10 sec to execute, u pay 10 + 60 sec, if ur query took 63 sec to execute u pay 63 + 60 sec !! after the idle time of 60 sec is over the virtual wh auto-suspends !!**
+
+- **If u run a 10 sec query and suspend the vwh manually using sql or snowsight u will pay for 60 sec not 70 sec, also when ur query runs for 64 sec and u suspend vwh manually u will pay for 64 sec only !!**
+
 ### Warehouse Sizes
 
 Sizes double in compute power (and credit consumption) as you go up:
@@ -147,6 +167,10 @@ CREATE WAREHOUSE bi_wh
 **Key distinction [Interview Hotspot]:**
 - **Scaling UP** (bigger `WAREHOUSE_SIZE`) → speeds up a *single* complex/heavy query.
 - **Scaling OUT** (multi-cluster, more clusters) → handles more *concurrent* queries/users, doesn't make one query faster.
+
+### Warehouse Type (only 2) : Standard vs Snowpark Optimized Wrehouse :
+- Normal vwh u create a standard by default create Snowpark Optimized Wrehouse when u need to execute Snowpark workloads (python , jave, udf, stored procedure), ml training ,etc, these vwh have 16x more RAM than standard and cost 1.5x as u are getting more RAM !!
+
 
 ### Scaling Policies (Multi-cluster only)
 - **Standard**: favors starting additional clusters quickly to keep query queuing to a minimum (prioritizes performance over cost).
@@ -222,6 +246,20 @@ When you load data into a Snowflake table, Snowflake automatically (you never do
 - Each micro-partition holds between **50 MB and 500 MB of uncompressed data** (compressed further on disk, so actual file size is usually smaller).
 - Data within a micro-partition is stored in a **columnar** format — meaning each column's values are stored together, not row-by-row. This is why analytical `SELECT col FROM table` type queries are fast — Snowflake only reads the columns you asked for, not entire rows.
 - Micro-partitions are **immutable** — once written, they are never edited in place. An `UPDATE` or `DELETE` creates *new* micro-partitions and marks old ones for removal (this connects directly to Time Travel later — old micro-partitions aren't deleted immediately, they're kept for the Time Travel retention window).
+
+## Imp concepts : Micro-partition Pruning, Clustering keys 
+
+1) In snowflake while forming micro-partitons we dont have PARTITION BY keys !! we can use clustering keys !!
+2) The task of Clustering key is just to make sure that wrt to whatever column the key is applied keep those data togethere on the disk, for this time to time re-writing in micro-partitions happen, because of this Effective Pruning can happen
+3) Pruning is basically skipping the scanning of micropartition by looking at min-max of each column as needed
+4) By default there is no clustering key, micro-partitions are formed as data enters contiguously
+5) Be careful while allocating clustering key, because if lot of ur queries are not wrt to clustering key column then their(other non clustering columns) min-max will be mixxed up so effectively pruning will not take place 😅 !!!! 
+6) Clustering key depends on ur query pattern, based on that u set the cluster key, this is the final ans 
+7) low cardinality columns : have repeated values (T/F), status : active/inactive ,etc.
+   High Cardinality columns : have very distinct values !!
+   putting a clustering key in somewhere middle works wonders , but that columns should be the one ur most filtering on !!!!
+
+# Pending topic above : Partition By VS cluster BY !! does both exists togethere ?
 
 ### Automatic Partitioning — No DBA Work Required
 
